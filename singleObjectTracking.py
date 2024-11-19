@@ -6,8 +6,10 @@ from tqdm import tqdm
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
+# Keeping the SlidingWindowTracker class unchanged since it works well
 class SlidingWindowTracker:
     def __init__(self, scale_factor=2.0, overlap=0.3):
         self.scale_factor = scale_factor
@@ -24,26 +26,21 @@ class SlidingWindowTracker:
         """Generate search windows around previous bounding box"""
         x, y, w, h = map(int, prev_bbox)
 
-        # Calculate expanded window size
         window_w = int(w * self.scale_factor)
         window_h = int(h * self.scale_factor)
 
-        # Calculate center position
         center_x = x + w // 2
         center_y = y + h // 2
 
-        # Calculate step size based on overlap
         step_x = int(w * (1 - self.overlap))
         step_y = int(h * (1 - self.overlap))
 
         windows = []
 
-        # Generate windows around the center
         for dy in range(-step_y, step_y + 1, max(1, step_y // 2)):
             for dx in range(-step_x, step_x + 1, max(1, step_x // 2)):
                 win_x = max(0, min(center_x - window_w // 2 + dx, img_shape[1] - window_w))
                 win_y = max(0, min(center_y - window_h // 2 + dy, img_shape[0] - window_h))
-
                 windows.append((win_x, win_y, window_w, window_h))
 
         return windows
@@ -52,22 +49,17 @@ class SlidingWindowTracker:
         """Score how well a window matches the template"""
         x, y, w, h = map(int, window)
         roi = img[y:y+h, x:x+w]
-
-        # Resize ROI to match template size
         roi = cv2.resize(roi, (template.shape[1], template.shape[0]))
 
-        # Extract features
         kp, desc = self.sift.detectAndCompute(roi, None)
 
         if desc is None or template_desc is None or len(desc) == 0 or len(template_desc) == 0:
             return 0
 
         try:
-            # Match features
             k = min(2, len(desc))
             matches = self.flann.knnMatch(template_desc, desc, k=k)
 
-            # Apply ratio test
             good_matches = []
             for match in matches:
                 if len(match) == 2:
@@ -81,20 +73,25 @@ class SlidingWindowTracker:
         except Exception:
             return 0
 
-class EnhancedVisualTrackingPipeline:
+class HybridTrackingPipeline:
     def __init__(self, directoryPath, test_size=0.2, random_state=42):
         self.directoryPath = directoryPath
         self.sequencePath = directoryPath + '/sequences'
         self.annotationPath = directoryPath + '/annotations'
         self.test_size = test_size
         self.random_state = random_state
-        self.scaler = StandardScaler()
-        self.model = RandomForestRegressor(n_estimators=150, random_state=random_state, n_jobs=-1)
+        
+        # Separate scalers for position and size predictions
+        self.position_scaler = StandardScaler()  # For x, y (Linear Regression)
+        self.size_scaler = StandardScaler()      # For width, height (Random Forest)
+        
+        # Initialize hybrid models
+        self.position_model = LinearRegression()  # For x, y coordinates
+        self.size_model = RandomForestRegressor(n_estimators=150, random_state=random_state, n_jobs=-1)  # For width, height
+        
         self.feature_cache = {}
-
-        # Initialize sliding window tracker
         self.window_tracker = SlidingWindowTracker()
-
+        
         # Template tracking state
         self.template = None
         self.template_keypoints = None
@@ -109,16 +106,13 @@ class EnhancedVisualTrackingPipeline:
         features = []
 
         if prev_bbox is not None:
-            # Generate and evaluate search windows
             windows = self.window_tracker.generate_search_windows(img.shape, prev_bbox)
 
             if self.template is None:
-                # Initialize template
                 x, y, w, h = map(int, prev_bbox)
                 self.template = gray[y:y+h, x:x+w].copy()
                 self.template_keypoints, self.template_descriptors = self.window_tracker.sift.detectAndCompute(self.template, None)
 
-            # Find best matching window
             best_score = -1
             best_window = None
 
@@ -142,36 +136,47 @@ class EnhancedVisualTrackingPipeline:
             x, y, w, h = 0, 0, gray.shape[1], gray.shape[0]
             roi = gray
 
-        # Resize ROI for consistent feature extraction
+        # Enhanced feature extraction
         roi = cv2.resize(roi, (64, 64))
-
-        # Extract statistical features
+        
+        # Basic statistical features
         features.extend([
             np.mean(roi),
             np.std(roi),
             *np.percentile(roi, [25, 50, 75])
         ])
 
-        # Extract edge features
+        # Edge features
         edges = cv2.Canny(roi, 100, 200)
         features.extend([
             np.mean(edges),
-            np.std(edges)
+            np.std(edges),
+            np.sum(edges > 0) / edges.size  # Edge density
         ])
 
-        # Add position and size information
+        # Gradient features
+        gx = cv2.Sobel(roi, cv2.CV_64F, 1, 0)
+        gy = cv2.Sobel(roi, cv2.CV_64F, 0, 1)
+        features.extend([
+            np.mean(np.abs(gx)),
+            np.mean(np.abs(gy)),
+            np.std(np.abs(gx)),
+            np.std(np.abs(gy))
+        ])
+
+        # Position and size information
         if prev_bbox is not None:
             features.extend([x, y, w, h])
         else:
             features.extend([0, 0, 0, 0])
 
-        # Add template matching score if available
+        # Template matching score
         features.append(best_score if prev_bbox is not None else 0)
 
         return np.array(features)
 
     def process_sequence(self, sequence):
-        """Process sequence with sliding window tracking"""
+        """Process sequence with enhanced feature extraction"""
         ann_file = os.path.join(self.annotationPath, f"{sequence}.txt")
         annotations = np.loadtxt(ann_file, delimiter=',')
         img_files = sorted(glob(os.path.join(self.sequencePath, sequence, "*")))
@@ -194,11 +199,11 @@ class EnhancedVisualTrackingPipeline:
                 features = self.extract_features_with_sliding_window(img, prev_bbox)
                 self.feature_cache[img_path] = features
 
-                # Update template periodically if tracking is stable
+                # Adaptive template update
                 template_update_counter += 1
-                if template_update_counter >= 5 and prev_bbox is not None:  # More frequent updates
+                if template_update_counter >= 5 and prev_bbox is not None:
                     iou = self.calculate_iou(prev_bbox, bbox)
-                    if iou > 0.6:  # More lenient threshold
+                    if iou > 0.6:
                         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                         x, y, w, h = map(int, bbox)
                         self.template = gray[y:y+h, x:x+w].copy()
@@ -218,7 +223,7 @@ class EnhancedVisualTrackingPipeline:
         }
 
     def prepare_data(self):
-        """Prepare data with sequence splitting"""
+        """Prepare data for both models"""
         sequence_folders = [f for f in os.listdir(self.sequencePath)
                           if os.path.isdir(os.path.join(self.sequencePath, f))]
 
@@ -261,7 +266,7 @@ class EnhancedVisualTrackingPipeline:
         return max(0.0, min(1.0, iou))
 
     def create_tracking_video(self, sequence_data, y_pred, output_path, fps=30):
-        """Create visualization video with search windows"""
+        """Create visualization video for hybrid model predictions"""
         if len(sequence_data['paths']) == 0:
             return
 
@@ -289,7 +294,7 @@ class EnhancedVisualTrackingPipeline:
                     x, y, w, h = map(int, window)
                     cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 255), 1)
 
-            # Draw true box (green)
+            # Draw ground truth box (green)
             x, y, w, h = map(int, true_box)
             cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
             cv2.putText(img, 'Ground Truth', (x, y-10),
@@ -298,14 +303,13 @@ class EnhancedVisualTrackingPipeline:
             # Draw predicted box (red)
             x, y, w, h = map(int, pred_box)
             cv2.rectangle(img, (x, y), (x+w, y+h), (0, 0, 255), 2)
-            cv2.putText(img, 'Predicted', (x, y-25),
+            cv2.putText(img, 'Hybrid Prediction', (x, y-25),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
             # Calculate and display IoU
             iou = self.calculate_iou(true_box, pred_box)
             cv2.putText(img, f'IoU: {iou:.3f}', (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-
             cv2.putText(img, f'Frame: {i}', (10, 60),
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
@@ -314,70 +318,120 @@ class EnhancedVisualTrackingPipeline:
         out.release()
 
     def train_and_evaluate(self, output_dir='output_videos'):
-        """Train model and evaluate results"""
+        """Train and evaluate hybrid model approach"""
         print("Preparing data...")
         X_train, y_train, train_data, test_data = self.prepare_data()
 
-        X_train_scaled = self.scaler.fit_transform(X_train)
+        # Split features for position and size prediction
+        X_train_position = self.position_scaler.fit_transform(X_train)
+        X_train_size = self.size_scaler.fit_transform(X_train)
 
-        print("Training model...")
-        self.model.fit(X_train_scaled, y_train)
+        # Split labels into position (x,y) and size (width,height)
+        y_train_position = y_train[:, :2]  # x, y coordinates
+        y_train_size = y_train[:, 2:]      # width, height
+
+        print("Training hybrid models...")
+        # Train Linear Regression for position prediction
+        self.position_model.fit(X_train_position, y_train_position)
+        # Train Random Forest for size prediction
+        self.size_model.fit(X_train_size, y_train_size)
 
         os.makedirs(output_dir, exist_ok=True)
 
         print("Processing test sequences and creating videos...")
-        all_test_predictions = []
+        all_predictions = []
         all_test_true = []
 
         for sequence in tqdm(test_data):
-            X_test_scaled = self.scaler.transform(sequence['features'])
-            y_pred = self.model.predict(X_test_scaled)
+            # Transform features for both models
+            X_test_position = self.position_scaler.transform(sequence['features'])
+            X_test_size = self.size_scaler.transform(sequence['features'])
+            
+            # Predict positions using Linear Regression
+            position_pred = self.position_model.predict(X_test_position)
+            # Predict sizes using Random Forest
+            size_pred = self.size_model.predict(X_test_size)
+            
+            # Combine predictions
+            y_pred = np.hstack([position_pred, size_pred])
 
             video_path = os.path.join(output_dir, f"{sequence['sequence_name']}_tracking.mp4")
             self.create_tracking_video(sequence, y_pred, video_path)
 
-            all_test_predictions.append(y_pred)
+            all_predictions.append(y_pred)
             all_test_true.append(sequence['labels'])
 
         y_test = np.vstack(all_test_true)
-        y_pred = np.vstack(all_test_predictions)
+        y_pred = np.vstack(all_predictions)
 
         print("\nModel Evaluation Metrics:")
-        coordinates = ['x', 'y', 'width', 'height']
-
-        for i, coord in enumerate(coordinates):
+        
+        # Evaluate position predictions (Linear Regression)
+        print("\nLinear Regression Model (Position Predictions):")
+        for i, coord in enumerate(['x', 'y']):
             print(f"\nMetrics for {coord}:")
             print(f"MAE: {mean_absolute_error(y_test[:, i], y_pred[:, i]):.4f}")
             print(f"RMSE: {np.sqrt(mean_squared_error(y_test[:, i], y_pred[:, i])):.4f}")
             print(f"R2 Score: {r2_score(y_test[:, i], y_pred[:, i]):.4f}")
 
+        # Evaluate size predictions (Random Forest)
+        print("\nRandom Forest Model (Size Predictions):")
+        for i, dim in enumerate(['width', 'height']):
+            print(f"\nMetrics for {dim}:")
+            print(f"MAE: {mean_absolute_error(y_test[:, i+2], y_pred[:, i+2]):.4f}")
+            print(f"RMSE: {np.sqrt(mean_squared_error(y_test[:, i+2], y_pred[:, i+2])):.4f}")
+            print(f"R2 Score: {r2_score(y_test[:, i+2], y_pred[:, i+2]):.4f}")
+
+        # Calculate overall IoU
         ious = [self.calculate_iou(true, pred) for true, pred in zip(y_test, y_pred)]
         print(f"\nMean IoU: {np.mean(ious):.4f}")
 
         print(f"\nTracking videos have been saved to {output_dir}/")
 
+        return {
+            'position_metrics': {
+                'x_mae': mean_absolute_error(y_test[:, 0], y_pred[:, 0]),
+                'y_mae': mean_absolute_error(y_test[:, 1], y_pred[:, 1])
+            },
+            'size_metrics': {
+                'width_mae': mean_absolute_error(y_test[:, 2], y_pred[:, 2]),
+                'height_mae': mean_absolute_error(y_test[:, 3], y_pred[:, 3])
+            },
+            'mean_iou': np.mean(ious)
+        }
+
 def main():
-    """Main function to run the enhanced tracking pipeline"""
+    """Main function to run the hybrid tracking pipeline"""
     directoryPath = './drive/MyDrive/MLP_MT24024/ObjectTracking'  # Update path as needed
 
     CONFIG = {
         'test_size': 0.2,
         'random_state': 42,
-        'output_dir': 'enhanced_tracking_results'
+        'output_dir': 'hybrid_tracking_results'
     }
 
     try:
-        print("Initializing Enhanced Visual Tracking Pipeline...")
-        pipeline = EnhancedVisualTrackingPipeline(
+        print("Initializing Hybrid Visual Tracking Pipeline...")
+        pipeline = HybridTrackingPipeline(
             directoryPath=directoryPath,
             test_size=CONFIG['test_size'],
             random_state=CONFIG['random_state']
         )
 
         print("\nStarting training and evaluation process...")
-        pipeline.train_and_evaluate(output_dir=CONFIG['output_dir'])
+        results = pipeline.train_and_evaluate(output_dir=CONFIG['output_dir'])
 
-        print("\nEnhanced tracking pipeline completed successfully!")
+        # Display summary
+        print("\nSummary of Results:")
+        print("Position Prediction (Linear Regression):")
+        print(f"X coordinate MAE: {results['position_metrics']['x_mae']:.4f}")
+        print(f"Y coordinate MAE: {results['position_metrics']['y_mae']:.4f}")
+        print("\nSize Prediction (Random Forest):")
+        print(f"Width MAE: {results['size_metrics']['width_mae']:.4f}")
+        print(f"Height MAE: {results['size_metrics']['height_mae']:.4f}")
+        print(f"\nOverall Mean IoU: {results['mean_iou']:.4f}")
+
+        print("\nHybrid tracking pipeline completed successfully!")
 
     except Exception as e:
         print(f"\nError occurred during pipeline execution: {str(e)}")
@@ -385,4 +439,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
