@@ -170,3 +170,117 @@ print(is_palindrome("hello"))       # False
 - Python's official documentation
 - "Python Crash Course" by Eric Matthes
 - "Fluent Python" by Luciano Ramalho
+---
+
+## 8. Constructors and Destructors in Python
+
+### Constructor (`__init__` method)
+
+#### What is a Constructor?
+- A special method called when an object is created
+- Used to initialize object attributes
+- Always named `__init__`
+- First parameter is always `self`
+
+```python
+class Person:
+    def __init__(self, name, age):
+        # Constructor initializes object attributes
+        self.name = name
+        self.age = age
+        print(f"A new Person object is created for {name}")
+
+# Creating an object calls the constructor
+john = Person("John Doe", 30)
+```
+
+#### Constructor Types
+1. **Default Constructor**
+```python
+class DefaultExample:
+    def __init__(self):
+        # No parameters, sets default values
+        self.value = 0
+```
+
+2. **Parameterized Constructor**
+```python
+class Student:
+    def __init__(self, student_id, name, grades=None):
+        self.student_id = student_id
+        self.name = name
+        self.grades = grades or []
+```
+
+### Destructor (`__del__` method)
+
+#### What is a Destructor?
+- A method called when an object is about to be destroyed
+- Used for cleanup operations
+- Rarely used in Python due to automatic garbage collection
+- Named `__del__`
+
+```python
+class ResourceManager:
+    def __init__(self, resource_name):
+        self.resource = resource_name
+        print(f"Acquiring {self.resource}")
+
+    def __del__(self):
+        # Cleanup operations
+        print(f"Releasing {self.resource}")
+        # Could be used for closing files, database connections, etc.
+
+# Example of destructor in action
+def create_resource():
+    resource = ResourceManager("Database Connection")
+    return resource
+
+# When the object goes out of scope, __del__ is called
+temp = create_resource()
+del temp  # Explicitly calling destructor
+```
+
+#### Best Practices
+1. Use constructors to set up initial state
+2. Avoid complex logic in constructors
+3. Be cautious with destructors
+4. Prefer context managers (`with` statement) for resource management
+
+#### Context Managers (Alternative to Destructors)
+```python
+class FileManager:
+    def __init__(self, filename, mode):
+        self.filename = filename
+        self.mode = mode
+        self.file = None
+
+    def __enter__(self):
+        # Opens the file when entering the context
+        self.file = open(self.filename, self.mode)
+        return self.file
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Automatically closes the file when exiting the context
+        if self.file:
+            self.file.close()
+
+# Using context manager
+with FileManager('example.txt', 'w') as f:
+    f.write('Hello, World!')
+# File is automatically closed after the block
+```
+
+### Key Differences
+- **Constructor (`__init__`)**: 
+  - Called when object is created
+  - Initializes object attributes
+  - Always present in Python classes
+
+- **Destructor (`__del__`)**: 
+  - Called when object is about to be destroyed
+  - Rarely used due to Python's garbage collection
+  - Optional cleanup method
+
+---
+
