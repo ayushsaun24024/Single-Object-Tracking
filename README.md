@@ -6,7 +6,7 @@ This project blends **classical computer vision** with **machine learning models
 🎯 **Core Idea**  
 Track *one* object accurately across video frames using **motion compensation + ML prediction**, optimized for aerial videos.
 
-🌐 **Live Demo**: Coming Soon on HuggingFace Spaces
+🌐 **Live Demo**: [Click Here](https://huggingface.co/spaces/ayushsaun/Single_Object_Tracking)
 
 ---
 
